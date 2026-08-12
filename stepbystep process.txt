@@ -1,0 +1,196 @@
+Manual export logs to S3
+
+1. Create Ec2
+2. create IAM role
+  2.1 AWS Service - Ec2
+  2.2 Admin access
+  2.3 create role
+3. Assighn role to Ec2
+4.Install the CloudWatch Agent on the EC2 Instance
+   Connect to the EC2 Instance and run the command below to install couldwatch Agent
+     -sudo yum install amazon-cloudwatch-agent -y
+5. Create a Configuration File  using below command 
+     -sudo vi /opt/aws/amazon-cloudwatch-agent/bin/config.json
+	   {
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/*",
+            "log_group_name": "ec2-all-logs",
+            "log_stream_name": "{instance_id}-all-logs"
+          }
+        ]
+      }
+    }
+  }
+}
+
+6. Start the agent using the configuration file:
+
+   -sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s
+
+7. Verify Logs in CloudWatch
+   7.1 Open the CloudWatch Console in the AWS Management Console
+   7.2 Navigate to Logs → Log Groups
+8. Select a log group and view log streams for your EC2 instance
+
+9. Create Bucket
+  9.1 Create bucket policy   // Update bucket name
+     {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowCloudWatchLogs",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "logs.amazonaws.com"
+            },
+            "Action": [
+                "s3:PutObject",
+                "s3:GetBucketAcl",
+                "s3:GetObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::qwertyujksdf/*",
+                "arn:aws:s3:::qwertyujksdf"
+            ]
+        }
+    ]
+}
+
+10. Export logs to S3
+   10.1 Click on Actions → Export data to Amazon S3
+   10.2 wait for 5 mins, logs will be avail
+   
+ 
+
+     
+	 //   Lambda Function//
+	 
+1. Create Lambda function
+  1.1 assight execution role
+    1.1.1 Create IAM role 
+	1.1.2 AWS Service-Lambda and assighn Admin permission
+  1. 2 Create role
+  
+2. Copy below on lamda code: // update buckt name
+ 
+import boto3
+import gzip
+import json
+import time
+
+# AWS clients
+logs_client = boto3.client('logs')
+s3_client = boto3.client('s3')
+
+# Constants
+S3_BUCKET_NAME = 'amzn-s3-hgcgs-1'
+LOG_GROUP = 'ec2-all-logs'
+TIME_WINDOW_HOURS = 24  # Change to 12, 48, etc. if needed
+
+def lambda_handler(event, context):
+    start_time = int((time.time() - TIME_WINDOW_HOURS * 3600) * 1000)
+    end_time = int(time.time() * 1000)
+
+    # Paginate through all streams in the log group
+    paginator = logs_client.get_paginator('describe_log_streams')
+    page_iterator = paginator.paginate(logGroupName=LOG_GROUP)
+
+    uploaded_files = []
+
+    for page in page_iterator:
+        for stream in page['logStreams']:
+            log_stream_name = stream['logStreamName']
+
+            try:
+                # Fetch log events
+                response = logs_client.get_log_events(
+                    logGroupName=LOG_GROUP,
+                    logStreamName=log_stream_name,
+                    startTime=start_time,
+                    endTime=end_time,
+                    limit=10000
+                )
+
+                log_events = response.get('events', [])
+                if not log_events:
+                    continue  # Skip empty streams
+
+                # Compress and upload
+                log_data = json.dumps(log_events, default=str)
+                compressed_log_data = gzip.compress(log_data.encode('utf-8'))
+                timestamp = int(time.time())
+                file_name = f'cloudwatch-logs/{log_stream_name}-{timestamp}.json.gz'
+
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=file_name,
+                    Body=compressed_log_data,
+                    ContentType='application/gzip'
+                )
+
+                uploaded_files.append(file_name)
+
+            except Exception as e:
+                print(f"Error processing stream {log_stream_name}: {e}")
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'message': f'Successfully uploaded {len(uploaded_files)} log files to S3.',
+            'files': uploaded_files
+        })
+    }
+	
+3. Deploy the code 
+4. Test Code
+
+
+///   Lamda Schedule //
+
+1. Amazon EventBridge Scheduler
+2. Create Schedule
+  2.1 Occurrence: Recurring schedule
+  2.2 Schedule type: Cron-based schedule
+  2.3 Cron expression:  cron (
+
+25
+Minutes
+19
+Hours
+*
+Day of month
+*
+Month
+?
+Day of the week
+2026
+Year
+)
+
+3. Click on next
+4. Target detail: AWS Lambda
+5. Lambda function: Your Lambdafunction
+6. click on next
+7. Permissions : Use existing role (Lambda-admin access role)
+8. update Policy:
+  {
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Principal": {
+				"Service": [
+					"lambda.amazonaws.com",
+					"scheduler.amazonaws.com"
+				]
+			},
+			"Action": "sts:AssumeRole"
+		}
+	]
+}
+
+9. Create Schedule;
